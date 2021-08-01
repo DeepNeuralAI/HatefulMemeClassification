@@ -45,18 +45,93 @@ os.chdir(os.path.join(home, "mmf"))
 !pip install --editable .
 
 """## Convert to MMF format"""
-
 zip_file_path="/content/drive/MyDrive/Colab_Notebooks/hateful_memes/data/hateful_meme_data.zip"
-
 !mmf_convert_hm --zip_file=$zip_file_path --password="" --bypass_checksum 1
+!ls /root/.cache/torch/mmf/data/datasets/hateful_memes/defaults/images/img/ | wc -l
+
+""" Add Memotion """
+import pandas as pd
+!pip install -q kaggle
+!mkdir -p ~/.kaggle
+!mv $home/kaggle.json ~/.kaggle/
+!chmod 660 /root/.kaggle/kaggle.json
+!kaggle datasets download -d williamscott701/memotion-dataset-7k
+!unzip -qq memotion-dataset-7k.zip -d $home/
+memo_samples = pd.read_json("/content/hateful_memes-hate_detectron/utils/label_memotion.jsonl", lines=True)['img']
+memo_samples = [i.split('/')[1] for i in list(memo_samples)]
+img_dir = "/content/memotion_dataset_7k/images/")
+for img in memo_samples:
+    os.rename(f"{img_dir+img}", f"/root/.cache/torch/mmf/data/datasets/hateful_memes/defaults/images/img/{img}")
 
 !ls /root/.cache/torch/mmf/data/datasets/hateful_memes/defaults/images/img/ | wc -l
+
+""" Add MMHS150K """
+labeled_mmhs150k_gt = pd.read_json(os.path.join(home, "MMHS/MMHS150K_GT.json"), orient='index', convert_axes=False)
+imgs_mmhs150k_gt = labeled_mmhs150k_gt.index
+mmhs_dir = "/content/MMHS/img_resized/"
+mmhs_df = {}
+iter = 0
+for x in imgs_mmhs150k_gt:
+  img = x+".jpg"
+  df = {}
+  df['id'] = x
+  df['img'] = "img/" + x + ".jpg"
+  text = labeled_mmhs150k_gt.loc[x,'tweet_text']
+  df['text'] = text.split("http",1)[0] 
+  labels = labeled_mmhs150k_gt.loc[x,'labels_str']
+  i = 0
+  for x in labels: 
+    if x == "NotHate": pass
+    else: i+=1
+  if i>2: label = 1
+  elif i==0: label = 0
+  else: label = -1
+  df['label'] = label
+  mmhs_df[iter] = df
+  iter = iter+1
+mmhs_df = pd.DataFrame.from_dict(mmhs_df, orient='index')
+mmhs_df = mmhs_df[mmhs_df.label>=0]
+mmhs_df_0 = mmhs_df[mmhs_df.label==0].sample(n=500, random_state=1)
+mmhs_df_1 = mmhs_df[mmhs_df.label==1].sample(n=500, random_state=1)
+mmhs_df_2 = mmhs_df_0.append(mmhs_df_1).reset_index(drop=True)
+mmhs_json = mmhs_df_2.to_json(orient='records', lines=True)
+with open(os.path.join(home, "mmhs_op.jsonl"), "w", encoding='utf-8') as f:
+    f.write(mmhs_json)
+for x in mmhs_df_2['id']:
+  img = x+".jpg"
+  os.rename(f"{mmhs_dir+img}", f"/root/.cache/torch/mmf/data/datasets/hateful_memes/defaults/images/img/{img}")
+
+!ls /root/.cache/torch/mmf/data/datasets/hateful_memes/defaults/images/img/ | wc -l
+
+"""Add Misogynstic Meme Dataset """
+labeled_miso_gt = pd.read_json(os.path.join(home, "Miso/Misogynistic-MEME/train_miso.jsonl"), lines=True)
+labeled_miso_gt = labeled_miso_gt[['id', 'img', 'text', 'label']]
+miso_json = labeled_miso_gt.to_json(orient='records', lines=True)
+with open(os.path.join(home, "miso_op.jsonl"), "w", encoding='utf-8') as f:
+    f.write(miso_json)
+miso_dir = os.path.join(home, "Miso/Misogynistic-MEME/")
+for img1 in labeled_miso_gt['img']:
+    x = img1.split('/')[1]
+    os.rename(f"{miso_dir+img1}", f"/root/.cache/torch/mmf/data/datasets/hateful_memes/defaults/images/img/{x}")
+
+""" Merging the datasets """
+!python $home/concat_memo_mmhs_miso_hm.py --home $home
+
+"""Check class imbalance """
+check1 = pd.read_json(os.path.join(home, "train_miso.jsonl"), lines=True)
+check1.groupby('label').count()
+per_cls_weights = []
+beta = 0.9999
+cls_num_list = [3419, 5881]
+for n in cls_num_list:
+        term =  (1-beta**n)/(1-beta)
+        per_cls_weights.append(term)
+print(per_cls_weights)
 
 """## Feature Extraction
 
 ### VQA Mask-RCNN
 """
-
 import os
 os.chdir(home)
 !git clone https://gitlab.com/vedanuj/vqa-maskrcnn-benchmark
@@ -105,6 +180,7 @@ train_dir = "hateful_memes/defaults/annotations/train.jsonl"
 
 # # Define where train.jsonl is
 # train_dir = os.path.join(home, "train_v9.jsonl")
+
 !mmf_run \
         config="projects/visual_bert/configs/hateful_memes/from_coco.yaml" \
         model="visual_bert" \
@@ -130,6 +206,9 @@ train_dir = "hateful_memes/defaults/annotations/train.jsonl"
         optimizer.params.lr=5.0e-05 \
         env.save_dir=$save_dir \
         env.tensorboard_logdir=$log_dir \
+
+
+
 
 """### Run VisualBERT Model with Hyper-Parameter Sweep x27"""
 
@@ -316,3 +395,86 @@ for batch_size in hparams['batch_size']:
               print('Deleting model files for space saving')
               !rm -rf $save_path
               print('==================================================\n')
+
+
+''' Loss Experiments '''
+""" Use custom config  from_coco_mlsml.yaml, from_coco_focal.yaml, from_coco_mrl.yaml for different losses """
+""" Add code from custom_losses.py to /content/mmf/mmf/modules/losses.py """
+!mmf_run \
+        config="/content/from_coco_mlsml.yaml" \
+        model="visual_bert" \
+        dataset=hateful_memes \
+        run_type=train_val \
+        checkpoint.max_to_keep=1 \
+        checkpoint.resume_zoo=visual_bert.pretrained.cc.full \
+        training.tensorboard=True \
+        training.checkpoint_interval=50 \
+        training.evaluation_interval=50 \
+        training.max_updates=1000 \
+        training.log_interval=100 \
+        dataset_config.hateful_memes.max_features=100 \
+        dataset_config.hateful_memes.annotations.train[0]=$train_dir \
+        dataset_config.hateful_memes.annotations.val[0]=hateful_memes/defaults/annotations/dev_unseen.jsonl \
+        dataset_config.hateful_memes.annotations.test[0]=hateful_memes/defaults/annotations/test_unseen.jsonl \
+        dataset_config.hateful_memes.features.train[0]=$feats_dir \
+        dataset_config.hateful_memes.features.val[0]=$feats_dir \
+        dataset_config.hateful_memes.features.test[0]=$feats_dir \
+        training.lr_ratio=0.3 \
+        training.use_warmup=True \
+        training.batch_size=32 \
+        optimizer.params.lr=5.0e-05 \
+        env.save_dir=$save_dir \
+        env.tensorboard_logdir=$log_dir \
+
+!mmf_run \
+        config="/content/from_coco_focal.yaml" \
+        model="visual_bert" \
+        dataset=hateful_memes \
+        run_type=train_val \
+        checkpoint.max_to_keep=1 \
+        checkpoint.resume_zoo=visual_bert.pretrained.cc.full \
+        training.tensorboard=True \
+        training.checkpoint_interval=50 \
+        training.evaluation_interval=50 \
+        training.max_updates=1000 \
+        training.log_interval=100 \
+        dataset_config.hateful_memes.max_features=100 \
+        dataset_config.hateful_memes.annotations.train[0]=$train_dir \
+        dataset_config.hateful_memes.annotations.val[0]=hateful_memes/defaults/annotations/dev_unseen.jsonl \
+        dataset_config.hateful_memes.annotations.test[0]=hateful_memes/defaults/annotations/test_unseen.jsonl \
+        dataset_config.hateful_memes.features.train[0]=$feats_dir \
+        dataset_config.hateful_memes.features.val[0]=$feats_dir \
+        dataset_config.hateful_memes.features.test[0]=$feats_dir \
+        training.lr_ratio=0.3 \
+        training.use_warmup=True \
+        training.batch_size=32 \
+        optimizer.params.lr=5.0e-05 \
+        env.save_dir=$save_dir \
+        env.tensorboard_logdir=$log_dir \
+
+
+!mmf_run \
+        config="/content/from_coco_mrl.yaml" \
+        model="visual_bert" \
+        dataset=hateful_memes \
+        run_type=train_val \
+        checkpoint.max_to_keep=1 \
+        checkpoint.resume_zoo=visual_bert.pretrained.cc.full \
+        training.tensorboard=True \
+        training.checkpoint_interval=50 \
+        training.evaluation_interval=50 \
+        training.max_updates=1000 \
+        training.log_interval=100 \
+        dataset_config.hateful_memes.max_features=100 \
+        dataset_config.hateful_memes.annotations.train[0]=$train_dir \
+        dataset_config.hateful_memes.annotations.val[0]=hateful_memes/defaults/annotations/dev_unseen.jsonl \
+        dataset_config.hateful_memes.annotations.test[0]=hateful_memes/defaults/annotations/test_unseen.jsonl \
+        dataset_config.hateful_memes.features.train[0]=$feats_dir \
+        dataset_config.hateful_memes.features.val[0]=$feats_dir \
+        dataset_config.hateful_memes.features.test[0]=$feats_dir \
+        training.lr_ratio=0.3 \
+        training.use_warmup=True \
+        training.batch_size=32 \
+        optimizer.params.lr=5.0e-05 \
+        env.save_dir=$save_dir \
+        env.tensorboard_logdir=$log_dir \

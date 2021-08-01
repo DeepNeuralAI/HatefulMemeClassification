@@ -1,0 +1,13 @@
+includes:
+- ./defaults.yaml
+
+model_config:
+  visual_bert:
+    training_head_type: classification
+    num_labels: 2
+    losses:
+    - mlsml_custom
+
+checkpoint:
+  resume_pretrained: true
+  resume_zoo: visual_bert.pretrained.coco
